@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePrivy } from '@privy-io/react-auth';
 import { useAccount } from 'wagmi';
 import { User } from '../types';
-import { firebaseUserService, FirebaseUser } from '../services/firebase';
+import { firebaseUserService, signInToFirebaseWithPrivy, signOutOfFirebase } from '../services/firebase';
 
 interface AuthContextType {
   user: User | null;
@@ -46,6 +46,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   let privyLogout: (() => void) | undefined;
   let isPrivyAuthenticated = false;
   let privyUser: any = null;
+  let getPrivyAccessToken: (() => Promise<string | null>) | undefined;
   let walletAddress: string | undefined;
   
   try {
@@ -57,6 +58,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       privyLogout = privyHooks.logout;
       isPrivyAuthenticated = privyHooks.authenticated;
       privyUser = privyHooks.user;
+      getPrivyAccessToken = privyHooks.getAccessToken;
       walletAddress = accountHooks.address;
     }
   } catch (error) {
@@ -89,39 +91,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const ensureFirebaseSession = async (userId: string) => {
+    if (!getPrivyAccessToken) throw new Error('Privy is not available');
+    await signInToFirebaseWithPrivy(userId, getPrivyAccessToken);
+  };
+
   // Handle Privy authentication and Firebase sync
   const handlePrivyAuthentication = async () => {
     if (!privyUser) return;
 
     try {
       const userId = privyUser.id;
-      const email = privyUser.email?.address || privyUser.wallet?.address || 'unknown@privy.com';
-      const name = privyUser.email?.address?.split('@')[0] || privyUser.wallet?.address?.slice(0, 8) || 'Privy User';
+      await ensureFirebaseSession(userId);
 
-      // Check if user needs role selection
-      const needsRole = await firebaseUserService.userNeedsRoleSelection(
-        userId,
-        email,
-        walletAddress
-      );
+      const firebaseUser = await firebaseUserService.getUserById(userId);
 
-      if (needsRole) {
-        setNeedsRoleSelection(true);
-        return;
-      }
-
-      // Load existing user from Firebase
-      let firebaseUser = await firebaseUserService.getUserById(userId);
-      
-      // Fallback checks by email or wallet
-      if (!firebaseUser && email) {
-        firebaseUser = await firebaseUserService.getUserByEmail(email);
-      }
-      if (!firebaseUser && walletAddress) {
-        firebaseUser = await firebaseUserService.getUserByWalletAddress(walletAddress);
-      }
-
-      if (firebaseUser) {
+      if (firebaseUser?.type) {
         // Record last login
         await firebaseUserService.recordLastLogin(firebaseUser.id);
         
@@ -153,6 +138,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const email = privyUser.email?.address || privyUser.wallet?.address || 'unknown@privy.com';
       const name = privyUser.email?.address?.split('@')[0] || privyUser.wallet?.address?.slice(0, 8) || 'Privy User';
 
+      await ensureFirebaseSession(userId);
+
       // Create user with selected role
       const firebaseUser = await firebaseUserService.createUserWithRole(
         {
@@ -183,6 +170,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!user?.id) return;
 
     try {
+      if (privyUser?.id !== user.id) return;
+      await ensureFirebaseSession(user.id);
       const firebaseUser = await firebaseUserService.getUserById(user.id);
       if (firebaseUser) {
         const localUser = firebaseUserService.convertToLocalUser(firebaseUser);
@@ -249,6 +238,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
     setNeedsRoleSelection(false);
     localStorage.clear();
+    void signOutOfFirebase();
     if (privyLogout) {
       privyLogout();
     }
@@ -259,6 +249,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
     setNeedsRoleSelection(false);
     localStorage.removeItem('rwa-user');
+    void signOutOfFirebase();
     // Clear any Privy cached data
     localStorage.removeItem('privy:token');
     localStorage.removeItem('privy:refresh_token');

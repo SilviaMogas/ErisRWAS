@@ -1,0 +1,45 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      function isOwner() {
+        return request.auth != null && request.auth.uid == uid;
+      }
+
+      function validRole() {
+        return request.resource.data.type in ['investor', 'rwa-project'];
+      }
+
+      // kycStatus and subscriptionTier are server-managed: clients may only
+      // start at the defaults and can never change them afterwards.
+      function validNewServerFields() {
+        let data = request.resource.data;
+        return (!('kycStatus' in data) || data.kycStatus == 'pending')
+          && (!('subscriptionTier' in data) || data.subscriptionTier == 'free');
+      }
+
+      allow get: if isOwner();
+      allow list: if false;
+
+      allow create: if isOwner()
+        && request.resource.data.id == uid
+        && validRole()
+        && validNewServerFields()
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update: if isOwner()
+        && validRole()
+        && !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['id', 'kycStatus', 'subscriptionTier', 'createdAt', 'isPrivyUser'])
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
