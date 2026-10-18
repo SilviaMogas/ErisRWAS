@@ -16,5 +16,9 @@ test('private and authentication routes have an explicit noindex response policy
     source === '/:section(login|login-simple|register|role-selection|dashboard|marketplace|property|academy)/:path*');
   assert.ok(rule);
   assert.deepEqual(rule.headers, [{ key: 'X-Robots-Tag', value: 'noindex, nofollow, noarchive' }]);
+  const trailingSlashRule = config.headers.find(({ source }) =>
+    source === '/:section(login|login-simple|register|role-selection|dashboard|marketplace|property|academy)/');
+  assert.ok(trailingSlashRule);
+  assert.deepEqual(trailingSlashRule.headers, rule.headers);
   assert.deepEqual(config.rewrites, [{ source: '/(.*)', destination: '/index.html' }]);
 });
