@@ -1,78 +1,152 @@
 import { Resend } from 'resend';
 
-interface ContactFormData {
-  name: string;
-  email: string;
-  company?: string;
-  userType: 'investor' | 'originator' | 'general';
-  subject: string;
-  message: string;
-  phone?: string;
+const USER_TYPES = ['investor', 'originator', 'general'] as const;
+type UserType = (typeof USER_TYPES)[number];
+
+const FIELD_LIMITS = {
+  name: 100,
+  email: 254,
+  company: 120,
+  phone: 40,
+  subject: 150,
+  message: 5000
+} as const;
+
+const EMAIL_REGEX = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const RATE_LIMIT_PER_CLIENT = 5;
+const RATE_LIMIT_GLOBAL = 50;
+const requestLog = new Map<string, number[]>();
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-export async function POST(req: any, res: any) {
-  console.log('📧 Contact form API called');
+function singleLine(value: string): string {
+  return value.replace(/[\r\n\t]+/g, ' ').trim();
+}
+
+function readField(body: Record<string, unknown>, key: keyof typeof FIELD_LIMITS, required: boolean): string | null | undefined {
+  const raw = body[key];
+  if (raw === undefined || raw === null || raw === '') {
+    return required ? null : undefined;
+  }
+  if (typeof raw !== 'string') return null;
+  const value = key === 'message' ? raw.trim() : singleLine(raw);
+  if ((required && !value) || value.length > FIELD_LIMITS[key]) return null;
+  return value || undefined;
+}
+
+function isRateLimited(clientKey: string, now: number): boolean {
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const recent = (key: string) => (requestLog.get(key) ?? []).filter((t) => t > windowStart);
+
+  const global = recent('*');
+  const client = recent(clientKey);
+  if (global.length >= RATE_LIMIT_GLOBAL || client.length >= RATE_LIMIT_PER_CLIENT) {
+    requestLog.set('*', global);
+    requestLog.set(clientKey, client);
+    return true;
+  }
+  requestLog.set('*', [...global, now]);
+  requestLog.set(clientKey, [...client, now]);
+
+  for (const [key, times] of requestLog) {
+    if (!times.some((t) => t > windowStart)) requestLog.delete(key);
+  }
+  return false;
+}
+
+interface ApiRequest {
+  body?: unknown;
+  ip?: string;
+  socket?: { remoteAddress?: string };
+}
+
+interface ApiResponse {
+  status(code: number): ApiResponse;
+  json(body: unknown): unknown;
+  setHeader?(name: string, value: string): unknown;
+}
+
+function errorResponse(res: ApiResponse, status: number, message: string) {
+  return res.status(status).json({ error: message, message });
+}
+
+export async function POST(req: ApiRequest, res: ApiResponse) {
   try {
-    // Initialize Resend with API key check
+    const clientKey = String(req.ip ?? req.socket?.remoteAddress ?? 'unknown');
+    if (isRateLimited(clientKey, Date.now())) {
+      res.setHeader?.('Retry-After', String(RATE_LIMIT_WINDOW_MS / 1000));
+      return errorResponse(res, 429, 'Too many messages. Please try again later.');
+    }
+
+    const body: Record<string, unknown> =
+      req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+        ? (req.body as Record<string, unknown>)
+        : {};
+
+    const name = readField(body, 'name', true);
+    const email = readField(body, 'email', true);
+    const subject = readField(body, 'subject', true);
+    const message = readField(body, 'message', true);
+    const company = readField(body, 'company', false);
+    const phone = readField(body, 'phone', false);
+
+    if (!name || !email || !subject || !message || company === null || phone === null) {
+      return errorResponse(
+        res,
+        400,
+        'Missing or invalid fields: name, email, subject, and message are required and must be within length limits'
+      );
+    }
+
+    if (!EMAIL_REGEX.test(email)) {
+      return errorResponse(res, 400, 'Invalid email format');
+    }
+
+    const userType: UserType = USER_TYPES.includes(body.userType as UserType)
+      ? (body.userType as UserType)
+      : 'general';
+
     const apiKey = process.env.RESEND_API_KEY;
-    console.log('🔑 API Key available:', !!apiKey);
-    
     if (!apiKey) {
-      console.log('❌ No API key found');
-      return res.status(500).json({ 
-        error: 'Server configuration error: RESEND_API_KEY not found' 
-      });
+      console.error('Contact form: RESEND_API_KEY is not configured');
+      return errorResponse(res, 500, 'Email service is not configured. Please try again later.');
     }
-    
+
     const resend = new Resend(apiKey);
-    console.log('✅ Resend client initialized');
-    
-    const body: ContactFormData = req.body;
-    console.log('📝 Form data received:', { ...body, email: body.email?.substring(0, 3) + '***' });
-    const { name, email, company, userType, subject, message, phone } = body;
 
-    // Validation
-    if (!name || !email || !subject || !message) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: name, email, subject, and message are required' 
-      });
-    }
+    const templateNames: Record<UserType, string> = {
+      investor: 'Investor Inquiry',
+      originator: 'Asset Originator Inquiry',
+      general: 'General Inquiry'
+    };
+    const emailConfig = {
+      to: ['silviam@bmbweb3.com', 'julio.cruz@eb-ms.net'],
+      replyTo: email,
+      templateName: templateNames[userType]
+    };
+    const userTypeLabel = userType.charAt(0).toUpperCase() + userType.slice(1);
 
-    // Email validation
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ error: 'Invalid email format' });
-    }
+    const emailSubject = `[${emailConfig.templateName}] ${subject}`;
 
-    // Determine recipient and template based on user type
-    const getEmailConfig = (userType: string) => {
-      switch (userType) {
-        case 'investor':
-          return {
-            to: ['silviam@bmbweb3.com', 'julio.cruz@eb-ms.net'],
-            replyTo: email,
-            templateName: 'Investor Inquiry'
-          };
-        case 'originator':
-          return {
-            to: ['silviam@bmbweb3.com', 'julio.cruz@eb-ms.net'],
-            replyTo: email,
-            templateName: 'Asset Originator Inquiry'
-          };
-        default:
-          return {
-            to: ['silviam@bmbweb3.com', 'julio.cruz@eb-ms.net'],
-            replyTo: email,
-            templateName: 'General Inquiry'
-          };
-      }
+    const safe = {
+      name: escapeHtml(name),
+      email: escapeHtml(email),
+      mailto: escapeHtml(encodeURIComponent(email).replace(/%40/g, '@')),
+      company: company ? escapeHtml(company) : '',
+      phone: phone ? escapeHtml(phone) : '',
+      subject: escapeHtml(subject),
+      message: escapeHtml(message).replace(/\r?\n/g, '<br>')
     };
 
-    const emailConfig = getEmailConfig(userType);
-
-    // Create email content
-    const emailSubject = `[${emailConfig.templateName}] ${subject}`;
-    
     const emailHtml = `
       <!DOCTYPE html>
       <html>
@@ -102,41 +176,41 @@ export async function POST(req: any, res: any) {
             
             <div class="field">
               <span class="label">👤 Name:</span>
-              <div class="value">${name}</div>
+              <div class="value">${safe.name}</div>
             </div>
             
             <div class="field">
               <span class="label">📧 Email:</span>
-              <div class="value"><a href="mailto:${email}">${email}</a></div>
+              <div class="value"><a href="mailto:${safe.mailto}">${safe.email}</a></div>
             </div>
             
             ${company ? `
               <div class="field">
                 <span class="label">🏢 Company:</span>
-                <div class="value">${company}</div>
+                <div class="value">${safe.company}</div>
               </div>
             ` : ''}
             
             ${phone ? `
               <div class="field">
                 <span class="label">📞 Phone:</span>
-                <div class="value">${phone}</div>
+                <div class="value">${safe.phone}</div>
               </div>
             ` : ''}
             
             <div class="field">
               <span class="label">👥 User Type:</span>
-              <div class="value">${userType.charAt(0).toUpperCase() + userType.slice(1)}</div>
+              <div class="value">${userTypeLabel}</div>
             </div>
             
             <div class="field">
               <span class="label">📋 Subject:</span>
-              <div class="value">${subject}</div>
+              <div class="value">${safe.subject}</div>
             </div>
             
             <div class="field">
               <span class="label">💬 Message:</span>
-              <div class="message-content">${message.replace(/\n/g, '<br>')}</div>
+              <div class="message-content">${safe.message}</div>
             </div>
             
             <div class="footer">
@@ -156,7 +230,7 @@ Name: ${name}
 Email: ${email}
 ${company ? `Company: ${company}` : ''}
 ${phone ? `Phone: ${phone}` : ''}
-User Type: ${userType.charAt(0).toUpperCase() + userType.slice(1)}
+User Type: ${userTypeLabel}
 Subject: ${subject}
 
 Message:
@@ -167,7 +241,6 @@ Source: ErisRWA Contact Form
     `;
 
     // Send email to team (including silviam@bmbweb3.com)
-    console.log('📤 Sending team email to:', emailConfig.to);
     const { data: teamEmailData, error: teamEmailError } = await resend.emails.send({
       from: 'ErisRWA Contact <noreply@erisrwa.com>',
       to: emailConfig.to,
@@ -188,103 +261,18 @@ Source: ErisRWA Contact Form
     });
 
     if (teamEmailError) {
-      console.error('❌ Resend team email error:', teamEmailError);
-      return res.status(500).json({ 
-        error: 'Failed to send email to team. Please try again later.',
-        details: teamEmailError.message 
-      });
-    }
-    
-    console.log('✅ Team email sent successfully:', teamEmailData?.id);
-
-    // Send confirmation email to user
-    const autoReplyHtml = `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="utf-8">
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; }
-            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
-            .content { margin: 20px 0; }
-            .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 14px; color: #666; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>Thank you for contacting ErisRWA! 🚀</h1>
-            </div>
-            
-            <div class="content">
-              <p>Dear ${name},</p>
-              
-              <p>Thank you for your interest in ErisRWA! We have received your inquiry and our team will review it promptly.</p>
-              
-              <p><strong>Your submission details:</strong></p>
-              <ul>
-                <li><strong>Subject:</strong> ${subject}</li>
-                <li><strong>User Type:</strong> ${userType.charAt(0).toUpperCase() + userType.slice(1)}</li>
-                <li><strong>Submitted:</strong> ${new Date().toLocaleString()}</li>
-              </ul>
-              
-              <p><strong>What happens next?</strong></p>
-              <ul>
-                <li>🔍 Our team will review your inquiry within 24 hours</li>
-                <li>📞 A specialist will contact you to discuss your needs</li>
-                <li>💼 We'll provide personalized recommendations based on your profile</li>
-              </ul>
-              
-              <p>In the meantime, feel free to explore our platform and educational resources.</p>
-              
-              <p>Best regards,<br>
-              <strong>The ErisRWA Team</strong></p>
-            </div>
-            
-            <div class="footer">
-              <p><strong>ErisRWA</strong> - Premium Real World Assets Platform</p>
-              <p>📧 Email: contact@erisrwa.com | 🌐 Website: erisrwa.com</p>
-              <p>This is an automated response. Please do not reply to this email.</p>
-            </div>
-          </div>
-        </body>
-      </html>
-    `;
-
-    // Send confirmation email to user
-    console.log('📤 Sending confirmation email to:', email);
-    const { data: confirmationEmailData, error: confirmationEmailError } = await resend.emails.send({
-      from: 'ErisRWA <noreply@erisrwa.com>',
-      to: [email],
-      subject: 'Thank you for contacting ErisRWA - We\'ll be in touch soon!',
-      html: autoReplyHtml,
-      tags: [
-        {
-          name: 'category',
-          value: 'auto-reply'
-        }
-      ]
-    });
-
-    if (confirmationEmailError) {
-      console.error('❌ Resend confirmation email error:', confirmationEmailError);
-      // Don't fail the entire request if confirmation email fails
-      // The main team email was sent successfully
-    } else {
-      console.log('✅ Confirmation email sent successfully:', confirmationEmailData?.id);
+      console.error('Contact form: Resend team email error:', teamEmailError.name);
+      return errorResponse(res, 500, 'Failed to send email to team. Please try again later.');
     }
 
-    console.log('🎉 Contact form submission completed successfully');
     return res.status(200).json({
       success: true,
       message: 'Email sent successfully',
       teamEmailId: teamEmailData?.id,
-      confirmationEmailId: confirmationEmailData?.id,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    console.error('❌ Contact form API error:', error);
+    console.error('Contact form API error:', error instanceof Error ? error.message : 'unknown');
     return res.status(500).json({ 
       error: 'Internal server error. Please try again later.',
       timestamp: new Date().toISOString()
