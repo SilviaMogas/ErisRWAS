@@ -1,4 +1,14 @@
 {
+  "headers": [
+    {
+      "source": "/:section(login|login-simple|register|role-selection|dashboard|marketplace|property|academy)/:path*",
+      "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow, noarchive" }]
+    },
+    {
+      "source": "/:section(login|login-simple|register|role-selection|dashboard|marketplace|property|academy)/",
+      "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow, noarchive" }]
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",
