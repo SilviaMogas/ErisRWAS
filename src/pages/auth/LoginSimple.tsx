@@ -2,14 +2,14 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { usePrivy } from '@privy-io/react-auth';
 import { useAccount } from 'wagmi';
-import { firebaseUserService } from '../../services/firebase';
+import { firebaseUserService, signInToFirebaseWithPrivy } from '../../services/firebase';
 import { User, Users, ArrowRight, Shield, Star } from 'lucide-react';
 
 const LoginSimple: React.FC = () => {
   const [userType, setUserType] = useState<'investor' | 'rwa-project'>('investor');
   const [isLoading, setIsLoading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const { login, authenticated, user } = usePrivy();
+  const { login, authenticated, user, getAccessToken } = usePrivy();
   const { address } = useAccount();
   const navigate = useNavigate();
 
@@ -39,7 +39,7 @@ const LoginSimple: React.FC = () => {
       const email = user.email?.address || user.wallet?.address || 'unknown@privy.com';
       const name = user.email?.address?.split('@')[0] || user.wallet?.address?.slice(0, 8) || 'Privy User';
 
-      console.log('Saving user with role:', { userId, email, userType, walletAddress: address });
+      await signInToFirebaseWithPrivy(userId, getAccessToken);
 
       // Create or update user with selected role in Firebase
       const firebaseUser = await firebaseUserService.createUserWithRole(
@@ -79,6 +79,7 @@ const LoginSimple: React.FC = () => {
     const checkExistingUser = async () => {
       if (authenticated && user && !isLoading && !isProcessing) {
         try {
+          await signInToFirebaseWithPrivy(user.id, getAccessToken);
           const existingUser = await firebaseUserService.getUserById(user.id);
           if (existingUser && existingUser.type) {
             console.log('User already has role:', existingUser.type);
@@ -92,7 +93,7 @@ const LoginSimple: React.FC = () => {
     };
     
     checkExistingUser();
-  }, [authenticated, user, isLoading, isProcessing, navigate]);
+  }, [authenticated, user, isLoading, isProcessing, navigate, getAccessToken]);
 
   const LogoComponent = () => (
     <div className="relative w-12 h-12">
