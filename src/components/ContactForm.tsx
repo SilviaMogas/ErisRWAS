@@ -129,7 +129,7 @@ const ContactForm: React.FC<ContactFormProps> = ({ onClose, defaultUserType = 'g
         </p>
         <div className="bg-blue-50 rounded-lg p-4">
           <p className="text-sm text-blue-800">
-            Check your email for a confirmation message with next steps.
+            We'll reply to the email address you provided with next steps.
           </p>
         </div>
         {onClose && (

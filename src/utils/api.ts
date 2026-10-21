@@ -6,16 +6,17 @@ export class ApiClient {
     const url = `${API_BASE}${endpoint}`;
     
     const config: RequestInit = {
+      ...options,
       headers: {
         'Content-Type': 'application/json',
         ...options.headers,
       },
-      ...options,
     };
 
     // Add auth token if available
     const token = localStorage.getItem('auth-token');
-    if (token) {
+    const hasAuthorization = new Headers(options.headers).has('Authorization');
+    if (token && !hasAuthorization) {
       config.headers = {
         ...config.headers,
         'Authorization': `Bearer ${token}`,
@@ -63,11 +64,12 @@ export class ApiClient {
     });
   }
 
-  // KYC Verification
-  static async verifyKYC(inquiryId: string, userId: string) {
+  // KYC Verification: pass the Privy access token from usePrivy().getAccessToken()
+  static async verifyKYC(inquiryId: string, privyAccessToken: string) {
     return this.request('/kyc/verify', {
       method: 'POST',
-      body: JSON.stringify({ inquiryId, userId }),
+      headers: { 'Authorization': `Bearer ${privyAccessToken}` },
+      body: JSON.stringify({ inquiryId }),
     });
   }
 
